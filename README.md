@@ -25,8 +25,8 @@ the assumptions at the top of `picker.py` (latency and bandwidth of NVLink and a
   TP8 groups beat one TP16 group at batch 1, 32 and 128. This held when I moved NIC latency
   between 4 and 16 microseconds, NIC bandwidth between 25 and 100 GB/s, NVLink latency between
   1 and 10 microseconds, and offload efficiency between 0.3 and 0.8. It agrees in direction with
-  my earlier Vidur sweep of TP against PP on 8 GPUs (`../tp-pp-crossover`), where changing the
-  interconnect moved the crossover by one step.
+  my earlier Vidur sweep of TP against PP on 8 GPUs, where changing the interconnect moved the
+  crossover by one step.
 
 ## What I do not know
 
@@ -36,7 +36,7 @@ the assumptions at the top of `picker.py` (latency and bandwidth of NVLink and a
   Real switch or NIC offload has limits on aggregation rate, tenant sharing and precision that
   this does not model.
 - Pipeline parallelism, overlap of compute with communication, and MoE all-to-all are left out.
-  (`../moe-straggler` covers the all-to-all side.)
+  (I measured the MoE all-to-all straggler separately.)
 
 ## What I would do next, and would like to do in a lab
 
