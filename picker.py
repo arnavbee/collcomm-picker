@@ -27,6 +27,8 @@ def ring(n, m, a, bw):
 
 
 def tree(n, m, a, bw):
+    if n <= 1:
+        return 0.0          # nothing to reduce; the 2m/bw term is per hop, not per rank
     return 2 * math.ceil(math.log2(n)) * a + 2 * m / bw
 
 
@@ -58,7 +60,17 @@ def across_nodes(m, n_gpus, allow_offload):
 
 
 def allreduce(m, n_gpus, allow_offload=True):
-    if n_gpus <= P["gpus_per_node"]:
+    g = P["gpus_per_node"]
+    if n_gpus < 1:
+        raise ValueError(f"n_gpus must be at least 1, got {n_gpus}")
+    if n_gpus > g and n_gpus % g:
+        # across_nodes shards by g and counts nodes as n_gpus // g, so a partial
+        # node would be priced as free: 20 GPUs came out identical to 16, and 12
+        # came out with no inter-node term at all. Refuse instead of lying.
+        raise ValueError(
+            f"n_gpus={n_gpus} is not a whole number of {g}-GPU nodes; "
+            "the hierarchical model only prices full nodes")
+    if n_gpus <= g:
         return inside_node(m, n_gpus)
     return across_nodes(m, n_gpus, allow_offload)
 

@@ -10,6 +10,14 @@ the assumptions at the top of `picker.py` (latency and bandwidth of NVLink and a
 70B-class model, memory-bound decode). Change them and re-run. Standard library only.
 
     python3 picker.py
+    python3 -m unittest test_picker
+
+`test_picker.py` checks the formulas (one rank is free, cost grows with message size, the pick is
+the cheapest option) and re-derives every claim below, so the README cannot drift from the model.
+
+The hierarchical path only prices whole nodes, so `allreduce` now refuses a GPU count that is not
+a multiple of `gpus_per_node`. It used to shard by node and floor the node count, which made 20
+GPUs cost exactly the same as 16 and gave 12 GPUs no inter-node term at all.
 
 ## What it says under the default assumptions
 
@@ -22,9 +30,13 @@ the assumptions at the top of `picker.py` (latency and bandwidth of NVLink and a
   saves roughly 10-33% of decode communication depending on the latency assumptions. At 2 nodes
   it does not beat ring.
 - **Placement rule: keep the tensor-parallel group inside a node.** With the same 16 GPUs, two
-  TP8 groups beat one TP16 group at batch 1, 32 and 128. This held when I moved NIC latency
-  between 4 and 16 microseconds, NIC bandwidth between 25 and 100 GB/s, NVLink latency between
-  1 and 10 microseconds, and offload efficiency between 0.3 and 0.8. It agrees in direction with
+  TP8 groups beat one TP16 group at batch 1, 32 and 128. Sweeping all four fabric
+  assumptions together (NIC latency 4 to 16 microseconds, NIC bandwidth 25 to 100 GB/s, NVLink
+  latency 1 to 10 microseconds, offload efficiency 0.3 to 0.8) the rule holds in 234 of the 243
+  cells. The nine that flip are one corner: the fastest NIC and the fastest NVLink at batch 1,
+  where TP16 wins by under 1%, which is a tie inside the model's error rather than a reversal.
+  `test_picker.py` pins that corner, so a later change to the assumptions cannot quietly widen
+  it. It agrees in direction with
   my earlier Vidur sweep of TP against PP on 8 GPUs
   ([tp-pp-crossover](https://github.com/arnavbee/tp-pp-crossover)), where changing the
   interconnect moved the crossover by one step.
