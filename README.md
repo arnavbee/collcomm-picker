@@ -10,7 +10,12 @@ the assumptions at the top of `picker.py` (latency and bandwidth of NVLink and a
 70B-class model, memory-bound decode). Change them and re-run. Standard library only.
 
     python3 picker.py
+    python3 picker.py --set nic_alpha=4e-6 --set offload_eff=0.3
     python3 -m unittest test_picker
+
+`--set key=value` overrides one assumption without editing the file, and the header of the table
+says which numbers are not the defaults. Only keys that already exist in `PARAMS` are accepted,
+so a typo stops the run instead of printing a default table that looks swept.
 
 `test_picker.py` checks the formulas (one rank is free, cost grows with message size, the pick is
 the cheapest option) and re-derives every claim below, so the README cannot drift from the model.

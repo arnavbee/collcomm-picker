@@ -4,10 +4,12 @@ A cost model, not a measurement. Every number in PARAMS is an assumption you can
 change. Standard latency-bandwidth (alpha-beta) model, pure stdlib.
 
     python3 picker.py
+    python3 picker.py --set nic_alpha=4e-6 --set offload_eff=0.3
 """
+import argparse
 import math
 
-# ---- assumptions (edit these, then re-run) ---------------------------------
+# ---- assumptions (edit these, or override with --set key=value) -------------
 PARAMS = dict(
     gpus_per_node=8,
     nvlink_alpha=3e-6,      # s, per step inside a node
@@ -20,6 +22,36 @@ PARAMS = dict(
     hidden=8192, layers=80, dtype_bytes=2,
 )
 P = PARAMS
+
+# the counts have to stay whole; the rest are physical quantities
+INT_PARAMS = ("gpus_per_node", "hidden", "layers", "dtype_bytes")
+
+
+def apply_overrides(pairs):
+    """Apply "key=value" strings to P. Returns the keys that changed.
+
+    Only keys already in PARAMS are accepted: a typo would otherwise sit in the
+    dict doing nothing while the table printed the default and looked swept.
+    """
+    changed = []
+    for pair in pairs:
+        if "=" not in pair:
+            raise ValueError(f"--set wants key=value, got {pair!r}")
+        key, _, raw = pair.partition("=")
+        key, raw = key.strip(), raw.strip()
+        if key not in PARAMS:
+            raise ValueError(f"unknown assumption {key!r}; pick one of "
+                             + ", ".join(sorted(PARAMS)))
+        try:
+            value = int(raw) if key in INT_PARAMS else float(raw)
+        except ValueError:
+            raise ValueError(f"{key} wants {'an int' if key in INT_PARAMS else 'a number'}, "
+                             f"got {raw!r}") from None
+        if value <= 0:
+            raise ValueError(f"{key} must be positive, got {value}")
+        P[key] = value
+        changed.append(key)
+    return changed
 
 
 def ring(n, m, a, bw):
@@ -83,8 +115,22 @@ def decode_step(batch, n_gpus, allow_offload=True):
     return m, algo, comm, compute
 
 
-def main():
-    print("Tensor-parallel decode, 70B-class model, all numbers from PARAMS (assumed)\n")
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--set", dest="overrides", action="append", default=[],
+                    metavar="KEY=VALUE",
+                    help="override one assumption, e.g. --set nic_alpha=4e-6 (repeatable)")
+    args = ap.parse_args(argv)
+    try:
+        changed = apply_overrides(args.overrides)
+    except ValueError as e:
+        ap.error(str(e))
+
+    print("Tensor-parallel decode, 70B-class model, all numbers from PARAMS (assumed)")
+    if changed:
+        # say which numbers are not the defaults, so a pasted table is readable
+        print("overridden: " + ", ".join(f"{k}={P[k]:g}" for k in changed))
+    print()
     print(f"{'gpus':>4} {'batch':>5} {'msg':>8}  {'pick':<8} {'comm ms':>8} {'compute ms':>10} {'comm share':>10}   offload saves")
     for n in (8, 16, 32):
         for b in (1, 8, 32, 128, 512):

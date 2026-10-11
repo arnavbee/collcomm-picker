@@ -4,10 +4,13 @@ Stdlib only, like picker.py.
 
     python3 -m unittest -v test_picker
 """
+import contextlib
+import io
 import unittest
 
 import picker
-from picker import P, across_nodes, allreduce, decode_step, inside_node, offload, ring, tree
+from picker import (P, across_nodes, allreduce, apply_overrides, decode_step,
+                    inside_node, offload, ring, tree)
 
 MSG = 32 * P["hidden"] * P["dtype_bytes"]   # a batch-32 decode activation, 512 KB
 
@@ -69,6 +72,45 @@ class PartialNodes(unittest.TestCase):
         for n in (0, -8):
             with self.assertRaises(ValueError):
                 allreduce(MSG, n)
+
+
+class Overrides(unittest.TestCase):
+    """--set lets the README's "change them and re-run" happen without an edit."""
+
+    def setUp(self):
+        self.base = dict(P)
+        self.addCleanup(lambda: (P.clear(), P.update(self.base)))
+
+    def test_override_changes_the_model(self):
+        before = decode_step(32, 32)[2]
+        apply_overrides(["nic_alpha=16e-6"])
+        self.assertEqual(P["nic_alpha"], 16e-6)
+        self.assertGreater(decode_step(32, 32)[2], before)
+
+    def test_counts_stay_integers(self):
+        apply_overrides(["layers=32", "gpus_per_node=4"])
+        for key in ("layers", "gpus_per_node"):
+            self.assertIsInstance(P[key], int, key)
+
+    def test_unknown_key_is_rejected(self):
+        # a typo must not sit in the dict while the table prints the default
+        with self.assertRaises(ValueError):
+            apply_overrides(["nic_latency=4e-6"])
+        self.assertNotIn("nic_latency", P)
+
+    def test_bad_values_are_rejected(self):
+        for bad in ("nic_alpha", "nic_alpha=fast", "nic_bw=0", "nvlink_alpha=-1e-6"):
+            with self.assertRaises(ValueError):
+                apply_overrides([bad])
+        self.assertEqual(P, self.base)
+
+    def test_main_accepts_set_and_leaves_defaults_alone(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            picker.main(["--set", "offload_eff=0.3"])
+        self.assertIn("overridden: offload_eff=0.3", out.getvalue())
+        self.assertEqual(P["offload_eff"], 0.3)
+        self.assertEqual(picker.PARAMS["nic_alpha"], self.base["nic_alpha"])
 
 
 class ReadmeClaims(unittest.TestCase):
