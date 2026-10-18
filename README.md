@@ -15,7 +15,11 @@ the assumptions at the top of `picker.py` (latency and bandwidth of NVLink and a
 
 `--set key=value` overrides one assumption without editing the file, and the header of the table
 says which numbers are not the defaults. Only keys that already exist in `PARAMS` are accepted,
-so a typo stops the run instead of printing a default table that looks swept.
+so a typo stops the run instead of printing a default table that looks swept. `offload_eff` is a
+fraction of line rate and is refused above 1, because `offload_eff=8` for `0.8` is a fabric eight
+times faster than its own NIC and the table then says offload wins everywhere. The swept GPU
+counts follow `gpus_per_node` rather than the literals 8/16/32, so `--set gpus_per_node=6` prints
+6/12/24 instead of dying half a table in on a GPU count that is not a whole number of nodes.
 
 `test_picker.py` checks the formulas (one rank is free, cost grows with message size, the pick is
 the cheapest option) and re-derives every claim below, so the README cannot drift from the model.

@@ -104,6 +104,27 @@ class Overrides(unittest.TestCase):
                 apply_overrides([bad])
         self.assertEqual(P, self.base)
 
+    def test_efficiency_above_line_rate_is_rejected(self):
+        # offload_eff=8 (a slipped exponent for 0.8) divided the NIC bandwidth by
+        # eight times line rate and printed offload winning everywhere.
+        for bad in ("offload_eff=8", "offload_eff=1.01"):
+            with self.assertRaises(ValueError):
+                apply_overrides([bad])
+        self.assertEqual(P, self.base)
+        apply_overrides(["offload_eff=1"])
+        self.assertEqual(P["offload_eff"], 1.0)
+
+    def test_sweep_follows_gpus_per_node(self):
+        # the table used to ask for 8 GPUs whatever the node size, so a node that
+        # does not divide 8 died with a traceback mid-table
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            picker.main(["--set", "gpus_per_node=6"])
+        text = out.getvalue()
+        self.assertIn("one 12-GPU TP group better than two 6-GPU groups", text)
+        for n in (6, 12, 24):
+            self.assertRegex(text, rf"(?m)^\s*{n}\s+1\s")
+
     def test_main_accepts_set_and_leaves_defaults_alone(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

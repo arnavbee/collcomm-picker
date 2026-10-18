@@ -25,6 +25,8 @@ P = PARAMS
 
 # the counts have to stay whole; the rest are physical quantities
 INT_PARAMS = ("gpus_per_node", "hidden", "layers", "dtype_bytes")
+# fractions of a rate: a value above 1 would be a fabric beating its own line rate
+FRACTION_PARAMS = ("offload_eff",)
 
 
 def apply_overrides(pairs):
@@ -49,6 +51,12 @@ def apply_overrides(pairs):
                              f"got {raw!r}") from None
         if value <= 0:
             raise ValueError(f"{key} must be positive, got {value}")
+        if key in FRACTION_PARAMS and value > 1:
+            # offload_eff divides the NIC bandwidth, so 8 instead of 0.8 buys a
+            # fabric that sustains ten times line rate and the table then says
+            # offload wins everywhere. A fat-fingered exponent must not read as
+            # a result.
+            raise ValueError(f"{key} is a fraction of line rate, must be <= 1, got {value}")
         P[key] = value
         changed.append(key)
     return changed
@@ -131,8 +139,12 @@ def main(argv=None):
         # say which numbers are not the defaults, so a pasted table is readable
         print("overridden: " + ", ".join(f"{k}={P[k]:g}" for k in changed))
     print()
+    # Sweep whole nodes, not the literals 8/16/32: with --set gpus_per_node=6 the
+    # old sweep asked allreduce for 8 GPUs, which is 1.33 nodes, and the run died
+    # with a traceback half a table in. Same numbers as before at the default 8.
+    g = P["gpus_per_node"]
     print(f"{'gpus':>4} {'batch':>5} {'msg':>8}  {'pick':<8} {'comm ms':>8} {'compute ms':>10} {'comm share':>10}   offload saves")
-    for n in (8, 16, 32):
+    for n in (g, 2 * g, 4 * g):
         for b in (1, 8, 32, 128, 512):
             m, algo, comm, comp = decode_step(b, n)
             _, _, comm_sw, _ = decode_step(b, n, allow_offload=False)
@@ -141,13 +153,13 @@ def main(argv=None):
                   f"{comm / (comm + comp) * 100:>9.0f}%   {save}")
         print()
 
-    print("Placement rule: is one 16-GPU TP group better than two 8-GPU groups?")
-    print("(same GPUs; the 16-way group halves compute per GPU but pays the NIC on every layer)")
+    print(f"Placement rule: is one {2 * g}-GPU TP group better than two {g}-GPU groups?")
+    print(f"(same GPUs; the {2 * g}-way group halves compute per GPU but pays the NIC on every layer)")
     for b in (1, 32, 128):
-        _, _, c8, p8 = decode_step(b, 8)
-        _, _, c16, p16 = decode_step(b, 16)
-        print(f"  batch {b:>3}: TP8 step {(c8 + p8) * 1e3:6.2f} ms | TP16 step {(c16 + p16) * 1e3:6.2f} ms"
-              f" -> {'TP16 wins' if c16 + p16 < c8 + p8 else 'keep TP inside the node'}")
+        _, _, c1, p1 = decode_step(b, g)
+        _, _, c2, p2 = decode_step(b, 2 * g)
+        print(f"  batch {b:>3}: TP{g} step {(c1 + p1) * 1e3:6.2f} ms | TP{2 * g} step {(c2 + p2) * 1e3:6.2f} ms"
+              f" -> {f'TP{2 * g} wins' if c2 + p2 < c1 + p1 else 'keep TP inside the node'}")
 
 
 if __name__ == "__main__":
