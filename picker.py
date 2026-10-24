@@ -29,37 +29,49 @@ INT_PARAMS = ("gpus_per_node", "hidden", "layers", "dtype_bytes")
 FRACTION_PARAMS = ("offload_eff",)
 
 
-def apply_overrides(pairs):
-    """Apply "key=value" strings to P. Returns the keys that changed.
+def parse_override(pair):
+    """Turn one "key=value" string into (key, number). Raises ValueError if it is bad.
 
     Only keys already in PARAMS are accepted: a typo would otherwise sit in the
     dict doing nothing while the table printed the default and looked swept.
     """
-    changed = []
+    if "=" not in pair:
+        raise ValueError(f"--set wants key=value, got {pair!r}")
+    key, _, raw = pair.partition("=")
+    key, raw = key.strip(), raw.strip()
+    if key not in PARAMS:
+        raise ValueError(f"unknown assumption {key!r}; pick one of "
+                         + ", ".join(sorted(PARAMS)))
+    try:
+        value = int(raw) if key in INT_PARAMS else float(raw)
+    except ValueError:
+        raise ValueError(f"{key} wants {'an int' if key in INT_PARAMS else 'a number'}, "
+                         f"got {raw!r}") from None
+    if value <= 0:
+        raise ValueError(f"{key} must be positive, got {value}")
+    if key in FRACTION_PARAMS and value > 1:
+        # offload_eff divides the NIC bandwidth, so 8 instead of 0.8 buys a
+        # fabric that sustains ten times line rate and the table then says
+        # offload wins everywhere. A fat-fingered exponent must not read as
+        # a result.
+        raise ValueError(f"{key} is a fraction of line rate, must be <= 1, got {value}")
+    return key, value
+
+
+def apply_overrides(pairs):
+    """Apply "key=value" strings to P, all of them or none. Returns the keys that changed.
+
+    Parse the whole list before touching P. Applying as we went meant a rejected
+    --set still left the ones before it in place: `--set layers=32 --set nic_bw=0`
+    raised on the bandwidth and walked away with layers=32 in PARAMS, so the next
+    run in the same process swept a model nobody asked for.
+    """
+    staged = {}
     for pair in pairs:
-        if "=" not in pair:
-            raise ValueError(f"--set wants key=value, got {pair!r}")
-        key, _, raw = pair.partition("=")
-        key, raw = key.strip(), raw.strip()
-        if key not in PARAMS:
-            raise ValueError(f"unknown assumption {key!r}; pick one of "
-                             + ", ".join(sorted(PARAMS)))
-        try:
-            value = int(raw) if key in INT_PARAMS else float(raw)
-        except ValueError:
-            raise ValueError(f"{key} wants {'an int' if key in INT_PARAMS else 'a number'}, "
-                             f"got {raw!r}") from None
-        if value <= 0:
-            raise ValueError(f"{key} must be positive, got {value}")
-        if key in FRACTION_PARAMS and value > 1:
-            # offload_eff divides the NIC bandwidth, so 8 instead of 0.8 buys a
-            # fabric that sustains ten times line rate and the table then says
-            # offload wins everywhere. A fat-fingered exponent must not read as
-            # a result.
-            raise ValueError(f"{key} is a fraction of line rate, must be <= 1, got {value}")
-        P[key] = value
-        changed.append(key)
-    return changed
+        key, value = parse_override(pair)
+        staged[key] = value          # a key given twice keeps the last value
+    P.update(staged)
+    return list(staged)
 
 
 def ring(n, m, a, bw):

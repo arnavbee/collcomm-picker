@@ -10,7 +10,7 @@ import unittest
 
 import picker
 from picker import (P, across_nodes, allreduce, apply_overrides, decode_step,
-                    inside_node, offload, ring, tree)
+                    inside_node, offload, parse_override, ring, tree)
 
 MSG = 32 * P["hidden"] * P["dtype_bytes"]   # a batch-32 decode activation, 512 KB
 
@@ -102,6 +102,26 @@ class Overrides(unittest.TestCase):
         for bad in ("nic_alpha", "nic_alpha=fast", "nic_bw=0", "nvlink_alpha=-1e-6"):
             with self.assertRaises(ValueError):
                 apply_overrides([bad])
+        self.assertEqual(P, self.base)
+
+    def test_a_rejected_set_changes_nothing_at_all(self):
+        # the good pair used to land before the bad one raised, so
+        # `--set layers=32 --set nic_bw=0` kept layers=32 in PARAMS
+        for pairs in (["layers=32", "nic_bw=0"],
+                      ["nic_alpha=4e-6", "offload_eff=8"],
+                      ["hidden=4096", "nic_latency=1e-6"],
+                      ["gpus_per_node=4", "nvlink_bw=oops"]):
+            with self.assertRaises(ValueError):
+                apply_overrides(pairs)
+            self.assertEqual(P, self.base, pairs)
+
+    def test_a_key_given_twice_keeps_the_last_value(self):
+        changed = apply_overrides(["nic_bw=25e9", "nic_bw=100e9"])
+        self.assertEqual(P["nic_bw"], 100e9)
+        self.assertEqual(changed, ["nic_bw"])
+
+    def test_parse_override_does_not_touch_params(self):
+        self.assertEqual(parse_override(" layers = 32 "), ("layers", 32))
         self.assertEqual(P, self.base)
 
     def test_efficiency_above_line_rate_is_rejected(self):
