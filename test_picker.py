@@ -124,6 +124,17 @@ class Overrides(unittest.TestCase):
         self.assertEqual(parse_override(" layers = 32 "), ("layers", 32))
         self.assertEqual(P, self.base)
 
+    def test_non_finite_is_rejected(self):
+        # nan is not caught by "must be positive": nan <= 0 is False, so
+        # --set nic_bw=nan reached the model, printed nan ms, and still named
+        # "ring" as the pick because min() over nan comparisons keeps the first
+        # key it saw. A fabricated pick is worse than a refusal.
+        for bad in ("nic_bw=nan", "nic_alpha=inf", "nic_bw=-inf",
+                    "offload_eff=nan", "hbm_bw=infinity"):
+            with self.assertRaises(ValueError):
+                apply_overrides([bad])
+        self.assertEqual(P, self.base)
+
     def test_efficiency_above_line_rate_is_rejected(self):
         # offload_eff=8 (a slipped exponent for 0.8) divided the NIC bandwidth by
         # eight times line rate and printed offload winning everywhere.

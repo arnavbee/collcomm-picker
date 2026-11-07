@@ -47,6 +47,12 @@ def parse_override(pair):
     except ValueError:
         raise ValueError(f"{key} wants {'an int' if key in INT_PARAMS else 'a number'}, "
                          f"got {raw!r}") from None
+    if not math.isfinite(value):
+        # nan slips past every comparison below, so it used to reach the table:
+        # --set nic_bw=nan printed `nan` ms and still named a pick, because
+        # min() over nan comparisons just keeps whichever key it saw first.
+        # inf is no better: it silently zeroes a term the table claims to price.
+        raise ValueError(f"{key} must be a finite number, got {raw!r}")
     if value <= 0:
         raise ValueError(f"{key} must be positive, got {value}")
     if key in FRACTION_PARAMS and value > 1:

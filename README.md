@@ -15,7 +15,10 @@ the assumptions at the top of `picker.py` (latency and bandwidth of NVLink and a
 
 `--set key=value` overrides one assumption without editing the file, and the header of the table
 says which numbers are not the defaults. Only keys that already exist in `PARAMS` are accepted,
-so a typo stops the run instead of printing a default table that looks swept. `offload_eff` is a
+so a typo stops the run instead of printing a default table that looks swept. `nan` and `inf`
+are refused too: `nan` slipped past the positivity check (`nan <= 0` is False), so `--set
+nic_bw=nan` used to print `nan` ms and still name "ring" as the pick, because `min()` over
+NaN comparisons keeps whichever option it saw first. `offload_eff` is a
 fraction of line rate and is refused above 1, because `offload_eff=8` for `0.8` is a fabric eight
 times faster than its own NIC and the table then says offload wins everywhere. The swept GPU
 counts follow `gpus_per_node` rather than the literals 8/16/32, so `--set gpus_per_node=6` prints
