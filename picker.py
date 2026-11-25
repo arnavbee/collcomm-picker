@@ -90,6 +90,31 @@ def tree(n, m, a, bw):
     return 2 * math.ceil(math.log2(n)) * a + 2 * m / bw
 
 
+def reduce_scatter(n, m, a, bw):
+    """Cheapest reduce-scatter over n ranks, and the name of it.
+
+    The all-gather that mirrors it costs the same, so across_nodes prices both
+    with this. Two options, and they differ only in step count:
+
+      ring              n-1 steps, each m/n bytes
+      recursive halving log2(n) steps, halving the payload each step
+
+    Both move m(n-1)/n bytes per rank, so the bandwidth term is identical and
+    halving simply pays fewer latency terms: 3 instead of 7 on an 8-GPU node,
+    which is 12 us per phase on NVLink and 3.8 ms per token over 160
+    collectives. Halving needs a power-of-two rank count; otherwise only ring
+    is offered.
+    """
+    if n <= 1:
+        return "ring", 0.0
+    band = (n - 1) / n * m / bw
+    opts = {"ring": (n - 1) * a + band}
+    if n & (n - 1) == 0:                      # power of two
+        opts["halving"] = math.log2(n) * a + band
+    k = min(opts, key=opts.get)
+    return k, opts[k]
+
+
 def offload(n, m, a, bw):
     # reduce up and broadcast down inside the fabric: each rank sends m once, gets m once
     return 2 * a + m / (bw * P["offload_eff"])
@@ -107,7 +132,12 @@ def across_nodes(m, n_gpus, allow_offload):
     """Hierarchical: reduce-scatter in node, all-reduce across nodes on m/8, all-gather in node."""
     g = P["gpus_per_node"]
     nodes = n_gpus // g
-    rs = (g - 1) * P["nvlink_alpha"] + (g - 1) / g * m / P["nvlink_bw"]   # same cost for the all-gather
+    # the all-gather mirrors the reduce-scatter, so both phases cost rs. This
+    # used to be hardcoded to ring, which charged 7 NVLink latency terms per
+    # phase on an 8-GPU node where recursive halving pays 3 -- the one place the
+    # model still preferred ring on latency while inside_node was picking tree
+    # for exactly the opposite reason.
+    _, rs = reduce_scatter(g, m, P["nvlink_alpha"], P["nvlink_bw"])
     shard = m / g
     opts = {"ring": ring(nodes, shard, P["nic_alpha"], P["nic_bw"]),
             "tree": tree(nodes, shard, P["nic_alpha"], P["nic_bw"])}

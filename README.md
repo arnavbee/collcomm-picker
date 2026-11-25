@@ -1,9 +1,10 @@
 # Collective picker: which all-reduce, and when does offload pay?
 
 A small cost model for the all-reduce that tensor-parallel LLM decode pays twice per layer.
-It picks the algorithm (ring, tree, in-network offload) for each batch size and GPU count,
-and says whether a 16-GPU tensor-parallel group is worth it or the group should stay inside
-one node.
+It picks the algorithm (ring, tree, recursive halving, in-network offload) for each batch size
+and GPU count, and says whether a 16-GPU tensor-parallel group is worth it or the group should
+stay inside one node. Under the default assumptions that answer turns out to be a statement
+about the NIC's latency rather than a rule.
 
 This is a model. It is not a measurement. I had no GPU cluster, so every number comes from
 the assumptions at the top of `picker.py` (latency and bandwidth of NVLink and a 400 Gb/s NIC,
@@ -31,24 +32,34 @@ The hierarchical path only prices whole nodes, so `allreduce` now refuses a GPU 
 a multiple of `gpus_per_node`. It used to shard by node and floor the node count, which made 20
 GPUs cost exactly the same as 16 and gave 12 GPUs no inter-node term at all.
 
+Its two intra-node phases are priced with the cheaper of ring and **recursive halving**, not ring
+alone. Both move the same `m(n-1)/n` bytes per rank, so halving pays `log2(n)` latency terms where
+ring pays `n-1`: 3 instead of 7 on an 8-GPU node, which is 12 microseconds per phase and 3.8 ms
+per token over 160 collectives. Hardcoding ring there was the one place the model still preferred
+ring on latency while `inside_node` was picking tree for exactly the opposite reason, and it was
+paying for the placement rule below: with the phases priced properly the rule stops being general.
+Halving needs a power-of-two rank count, so a 6-GPU node is still offered ring only.
+
 ## What it says under the default assumptions
 
 - **Inside one node (8 GPUs) tree beats ring at every decode message size.** Messages are 16 KB
   to 8 MB. At that size the step count matters more than bandwidth.
-- **Across nodes, communication is 78-94% of the decode step.** The time is latency, not
-  bandwidth. Two intra-node phases and the inter-node phase add up to a fixed floor of tens
-  of microseconds per collective, and there are 160 collectives per token.
-- **In-network offload pays from 4 nodes (32 GPUs) up.** It cuts the number of steps, so it
-  saves roughly 10-33% of decode communication depending on the latency assumptions. At 2 nodes
-  it does not beat ring.
-- **Placement rule: keep the tensor-parallel group inside a node.** With the same 16 GPUs, two
-  TP8 groups beat one TP16 group at batch 1, 32 and 128. Sweeping all four fabric
-  assumptions together (NIC latency 4 to 16 microseconds, NIC bandwidth 25 to 100 GB/s, NVLink
-  latency 1 to 10 microseconds, offload efficiency 0.3 to 0.8) the rule holds in 234 of the 243
-  cells. The nine that flip are one corner: the fastest NIC and the fastest NVLink at batch 1,
-  where TP16 wins by under 1%, which is a tie inside the model's error rather than a reversal.
-  `test_picker.py` pins that corner, so a later change to the assumptions cannot quietly widen
-  it. It agrees in direction with
+- **Across nodes, communication is 68-92% of the decode step** (68-85% on two nodes, 81-92% on
+  four). The time is latency, not bandwidth. Each collective has a fixed floor of tens of
+  microseconds, and there are 160 collectives per token.
+- **In-network offload pays from 4 nodes (32 GPUs) up**, saving 25-32% of decode communication.
+  At 2 nodes it does not beat ring.
+- **"Keep the tensor-parallel group inside a node" is the NIC's latency, not a law.** With the
+  same 16 GPUs and the default 8 microsecond NIC, two TP8 groups beat one TP16 group at batch 32
+  (by 1.2%) and batch 128 (by 5.9%), while batch 1 is a tie (TP16 comes out 0.6% ahead). Sweeping all four
+  fabric assumptions together (NIC latency 4 to 16 microseconds, NIC bandwidth 25 to 100 GB/s,
+  NVLink latency 1 to 10 microseconds, offload efficiency 0.3 to 0.8) the rule holds in 144 of
+  the 243 cells, and which 99 flip is decided by the NIC latency alone: at 16 microseconds it
+  holds everywhere, at 8 it flips only at batch 1 and by under 1%, and at 4 microseconds one
+  TP16 group wins outright, by up to 22%. So the rule is worth stating as "keep TP inside the
+  node unless the inter-node latency is within a few microseconds of NVLink's", which is the
+  regime a tightly coupled fabric is sold on. `test_picker.py` pins all three regimes.
+  It agrees in direction with
   my earlier Vidur sweep of TP against PP on 8 GPUs
   ([tp-pp-crossover](https://github.com/arnavbee/tp-pp-crossover)), where changing the
   interconnect moved the crossover by one step.

@@ -6,11 +6,13 @@ Stdlib only, like picker.py.
 """
 import contextlib
 import io
+import math
 import unittest
 
 import picker
 from picker import (P, across_nodes, allreduce, apply_overrides, decode_step,
-                    inside_node, offload, parse_override, ring, tree)
+                    inside_node, offload, parse_override, reduce_scatter, ring,
+                    tree)
 
 MSG = 32 * P["hidden"] * P["dtype_bytes"]   # a batch-32 decode activation, 512 KB
 
@@ -31,6 +33,32 @@ class Formulas(unittest.TestCase):
         # on latency and only wins back on bandwidth at large messages.
         a, bw = P["nvlink_alpha"], P["nvlink_bw"]
         self.assertGreater(ring(8, 1 << 14, a, bw), tree(8, 1 << 14, a, bw))
+
+    def test_halving_reduce_scatter_moves_the_same_bytes_as_ring(self):
+        # both move m(n-1)/n per rank; halving just pays log2(n) latency terms
+        # instead of n-1, so the two differ by exactly the step count
+        a, bw = 3e-6, 400e9
+        for n in (2, 4, 8, 16):
+            band = (n - 1) / n * MSG / bw
+            self.assertAlmostEqual(ring(n, MSG, 0, bw) / 2, band)
+            name, cost = reduce_scatter(n, MSG, a, bw)
+            self.assertAlmostEqual(cost, math.log2(n) * a + band)
+            # at 2 ranks the two are the same single exchange, so min() keeps
+            # whichever key it saw first and the name says ring
+            self.assertEqual(name, "ring" if n == 2 else "halving", n)
+
+    def test_reduce_scatter_is_never_worse_than_ring(self):
+        a, bw = 3e-6, 400e9
+        for n in (2, 3, 4, 7, 8, 12, 16):
+            ring_rs = (n - 1) * a + (n - 1) / n * MSG / bw
+            self.assertLessEqual(reduce_scatter(n, MSG, a, bw)[1], ring_rs, n)
+
+    def test_halving_needs_a_power_of_two(self):
+        # recursive halving splits the buffer in two every step, so 6 ranks get
+        # ring only rather than a cost the algorithm cannot actually reach
+        for n in (3, 6, 12):
+            self.assertEqual(reduce_scatter(n, MSG, 3e-6, 400e9)[0], "ring")
+        self.assertEqual(reduce_scatter(1, MSG, 3e-6, 400e9), ("ring", 0.0))
 
     def test_offload_ignores_rank_count(self):
         # one reduce up, one broadcast down, inside the fabric
@@ -176,22 +204,37 @@ class ReadmeClaims(unittest.TestCase):
         self.assertEqual(decode_step(32, 32)[1], "offload")
 
     def test_comm_dominates_across_nodes(self):
-        for batch in (1, 32, 512):
-            _, _, comm, compute = decode_step(batch, 16)
-            self.assertGreater(comm / (comm + compute), 0.75, batch)
+        # 68-85% on two nodes, 81-92% on four; the two floors are 67.6% and 80.7%
+        for n, floor in ((16, 0.67), (32, 0.80)):
+            for batch in (1, 32, 512):
+                _, _, comm, compute = decode_step(batch, n)
+                self.assertGreater(comm / (comm + compute), floor, (n, batch))
 
-    def test_two_tp8_groups_beat_one_tp16_group(self):
-        for batch in (1, 32, 128):
+    def test_two_tp8_groups_beat_one_tp16_group_from_batch_32_up(self):
+        # batch 1 is a tie: TP16 comes out 0.6% ahead, which is inside the
+        # model's error. From batch 32 the NIC term on every layer decides it.
+        tie = [sum(decode_step(1, n)[2:]) for n in (8, 16)]
+        self.assertLess(abs(tie[0] - tie[1]) / tie[0], 0.01, tie)
+        for batch in (32, 128):
             tp8 = sum(decode_step(batch, 8)[2:])
             tp16 = sum(decode_step(batch, 16)[2:])
             self.assertLess(tp8, tp16, batch)
 
-    def test_placement_rule_survives_the_sweep_except_the_fastest_fabric(self):
+    def test_the_placement_rule_is_the_nics_latency_not_a_law(self):
         # README: the rule was checked with NIC latency 4-16 us, NIC bandwidth
         # 25-100 GB/s, NVLink latency 1-10 us, offload efficiency 0.3-0.8.
-        # Over the full grid it holds in 234 of 243 cells. The nine that flip are
-        # all the same corner: the fastest NIC (4 us) with the fastest NVLink
-        # (1 us) at batch 1, where TP16 wins by under 1% -- a tie, not a reversal.
+        # Over the full grid "keep TP inside the node" now holds in 144 of 243
+        # cells, and which 99 flip is not noise -- it is the NIC latency alone:
+        #
+        #   16 us NIC: the rule holds in every cell, at every batch.
+        #    8 us NIC: it flips at batch 1 only, by under 1% -- a tie.
+        #    4 us NIC: TP16 wins outright, by up to 22%, at batch 1 and 32 and
+        #              in two thirds of the batch-128 cells.
+        #
+        # Before the intra-node phases were priced with recursive halving the
+        # grid flipped in 9 cells, all one corner, and the README called the
+        # rule general. Eight ring latency terms per collective were paying for
+        # that generality, so the rule was really a statement about the NIC.
         base = dict(P)
         flipped = []
         try:
@@ -205,16 +248,27 @@ class ReadmeClaims(unittest.TestCase):
                                 tp8 = sum(decode_step(batch, 8)[2:])
                                 tp16 = sum(decode_step(batch, 16)[2:])
                                 if tp16 < tp8:
-                                    flipped.append((nic_alpha, nvlink_alpha, batch,
+                                    flipped.append((nic_alpha, batch,
                                                     (tp8 - tp16) / tp8))
         finally:
             P.clear()
             P.update(base)
 
-        self.assertEqual(len(flipped), 9, flipped)
-        for nic_alpha, nvlink_alpha, batch, margin in flipped:
-            self.assertEqual((nic_alpha, nvlink_alpha, batch), (4e-6, 1e-6, 1))
+        self.assertEqual(len(flipped), 99, len(flipped))
+        self.assertEqual(sum(1 for f in flipped if f[0] == 16e-6), 0)
+
+        slow = [f for f in flipped if f[0] == 8e-6]
+        self.assertEqual(len(slow), 27)
+        for _, batch, margin in slow:
+            self.assertEqual(batch, 1)
             self.assertLess(margin, 0.01, margin)
+
+        fast = [f for f in flipped if f[0] == 4e-6]
+        self.assertEqual(len(fast), 72)
+        self.assertEqual(sum(1 for f in fast if f[1] == 1), 27)
+        self.assertEqual(sum(1 for f in fast if f[1] == 32), 27)
+        self.assertEqual(sum(1 for f in fast if f[1] == 128), 18)
+        self.assertGreater(max(f[2] for f in fast), 0.2)
 
 
 if __name__ == "__main__":
